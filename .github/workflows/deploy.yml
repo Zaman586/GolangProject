@@ -1,0 +1,78 @@
+name: Deploy Golang App to AWS ECS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: 542711725469.dkr.ecr.us-east-1.amazonaws.com/golang-app
+  ECS_CLUSTER: golang-cluster
+  ECS_SERVICE: golang-service
+  ECS_TASK_FAMILY: golang-task
+  CONTAINER_NAME: golang-container
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO
+
+    - name: Build Docker image
+      run: |
+        docker build -t golang-app .
+
+    - name: Tag Docker image
+      run: |
+        IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)
+        docker tag golang-app:latest $ECR_REPO:$IMAGE_TAG
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+    - name: Push Docker image to ECR
+      run: |
+        docker push $ECR_REPO:$IMAGE_TAG
+
+    - name: Register ECS task definition
+      run: |
+        aws ecs register-task-definition \
+          --family $ECS_TASK_FAMILY \
+          --network-mode awsvpc \
+          --requires-compatibilities FARGATE \
+          --cpu "256" \
+          --memory "512" \
+          --execution-role-arn arn:aws:iam::542711725469:role/ecsTaskExecutionRole \
+          --container-definitions "[
+            {
+              \"name\": \"${{ env.CONTAINER_NAME }}\",
+              \"image\": \"${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}\",
+              \"essential\": true,
+              \"portMappings\": [
+                {
+                  \"containerPort\": 8080,
+                  \"protocol\": \"tcp\"
+                }
+              ]
+            }
+          ]"
+
+    - name: Update ECS service to use new task definition
+      run: |
+        NEW_TASK_DEF=$(aws ecs describe-task-definition --task-definition $ECS_TASK_FAMILY | jq -r '.taskDefinition.taskDefinitionArn')
+        aws ecs update-service \
+          --cluster $ECS_CLUSTER \
+          --service $ECS_SERVICE \
+          --task-definition $NEW_TASK_DEF
